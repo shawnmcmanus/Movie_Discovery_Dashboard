@@ -1,17 +1,31 @@
 import sqlite3
 import bcrypt
 import requests
-import urllib.parse
 import os
+from urllib.parse import quote
 from dotenv import load_dotenv
-# from flask import Flask
+from flask import Flask
+import time
+import html
+
+MICROSERVICE_SEARCH_URL = "http://localhost:8080/movies"
+MICROSERVICE_RECOMMENDATION_URL = "http://localhost:8083/recommendations"
+MICROSERVICE_WHERE_TO_WATCH_URL = "http://localhost:8082/watch"
+MICROSERVICE_TRIVIA_URL = "http://localhost:8081/trivia"
 
 load_dotenv()
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+
 if not TMDB_API_KEY:
     raise ValueError("The TMDB_API_KEY is missing from the .env file.")
-# app = Flask(__name__) (*for microservices)
-# app.secret_key = "your_secret_key"
+
+app = Flask(__name__) 
+@app.route("/microservices/movie_search.py", methods=["GET"])
+@app.route("/microservices/recommendation.py", methods=["GET"])
+@app.route("/microservices/where_to_watch.py", methods=["GET"])
+@app.route("/microservices/trivia.py", methods=["GET"])
+@app.route("/")
+
 
 def fetch_movie_from_tmdb(title):
     """
@@ -29,7 +43,7 @@ def fetch_movie_from_tmdb(title):
     return None
 
 
-def print_movie_details(title, release_date, overview, genre_str, director):
+def print_movie_details(title, release_date, overview, genre_str, director, platforms_str):
     """
     param: title:- Movie title
     param: release_date:- Release date of the movie title (YYYY-MM-DD)
@@ -44,6 +58,51 @@ def print_movie_details(title, release_date, overview, genre_str, director):
     print(f"🎭 Genre(s): {genre_str}")
     print(f"🎬 Director: {director}")
     print(f"📖 Summary: {overview}")
+    print(f"🎬 Where to Watch: {platforms_str}")
+
+
+def fetch_movie_data(title):
+    """
+    Fetch movie search results from the microservice
+    """
+    response = requests.get(MICROSERVICE_SEARCH_URL, params={"title": title.strip()})
+    if response.status_code != 200:
+        return None
+    return response.json() or None
+
+
+def fetch_movie_details(movie_id):
+    """
+    Fetch detailed movie info from TMDB
+    """
+    details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&append_to_response=credits"
+    response = requests.get(details_url)
+    return response.json() if response.status_code == 200 else {}
+
+
+def display_movie_details(details_data, movie_id):
+    """
+    Extract and print relevant movie details
+    """
+    title = details_data.get("title", "Unknown Title")
+    release_date = details_data.get("release_date", "N/A")
+    overview = details_data.get("overview", "No summary available.")
+    genres = ", ".join([genre["name"] for genre in details_data.get("genres", [])]) or "N/A"
+    director = next((crew["name"] for crew in details_data.get("credits", {}).get("crew", []) if crew["job"] == "Director"), "N/A")
+
+    title_encoded = quote(title)
+    response = requests.get(f"{MICROSERVICE_WHERE_TO_WATCH_URL}/{title_encoded}/{movie_id}")
+    if response.status_code == 200:
+        streaming_data = response.json()
+        streaming_platforms = streaming_data.get("services", [])
+        if streaming_platforms:
+            platforms_str = ", ".join(streaming_platforms)
+        else:
+            platforms_str = "Not Available"
+    else:
+        return {"Error": "Movie not found on streaming services"}
+
+    print_movie_details(title, release_date, overview, genres, director, platforms_str)
 
 
 def handle_search_results(movie_data):
@@ -71,35 +130,14 @@ def search_for_movie_from_tmdb(title):
     param: title:- Movie title for search
     Search for a specific movie and return detailed information
     """
-    query = urllib.parse.quote(title.strip())  # Ensure special characters are handled
-    url = f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={query}"
-
-    response = requests.get(url)
-    data = response.json()
-
-    if not data["results"]:
+    movie_data = fetch_movie_data(title)
+    if not movie_data:
         print("Movie not found. Try refining your search.")
         return None
-
-    movie_id = handle_search_results(data)
-
-    details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMDB_API_KEY}&append_to_response=credits"
-    details_response = requests.get(details_url)
-    details_data = details_response.json()
-
-    title = details_data.get("title", "Unknown Title")
-    release_date = details_data.get("release_date", "N/A")
-    overview = details_data.get("overview", "No summary available.")
-    genres = [genre["name"] for genre in details_data.get("genres", [])]
-    genre_str = ", ".join(genres) if genres else "N/A"
-
-    director = "N/A"
-    for crew_member in details_data.get("credits", {}).get("crew", []):
-        if crew_member["job"] == "Director":
-            director = crew_member["name"]
-            break
-
-    print_movie_details(title, release_date, overview, genre_str, director)
+    
+    movie_id = handle_search_results({"results": movie_data})
+    details_data = fetch_movie_details(movie_id)
+    display_movie_details(details_data, movie_id)
 
 
 def get_genre_id(genre_name):
@@ -146,25 +184,12 @@ def fetch_genre_from_tmdb(genre_name, num_of_movies):
         print("Genre not found. Please check your entry and try again.")
         return []
     
-    all_movies = []
-    page = 1 # Start results at page 1
-
-    while len(all_movies) < num_of_movies:
-        url = (f"https://api.themoviedb.org/3/discover/movie?api_key={TMDB_API_KEY}"
-           f"&with_genres={genre_id}&sort_by=vote_average.desc&vote_count.gte=100"
-           f"&page={page}")
-        response = requests.get(url)
-        data = response.json()
-
-        if "results" in data:
-            all_movies.extend(data["results"])
-        else:
-            break
-
-        page += 1
-
-    top_movies = all_movies[:num_of_movies]
-    print_genre_list(top_movies, genre_name, num_of_movies)
+    response = requests.get(MICROSERVICE_SEARCH_URL, params={"genre": genre_id, "num_of_movies": num_of_movies})
+    if response.status_code == 200:
+        all_movies = response.json()
+        print_genre_list(all_movies, genre_name, num_of_movies)
+    else:
+        print(f"Error fetching movies: {response.status_code} - {response.text}")
 
 
 def init_movie_db():
@@ -195,7 +220,7 @@ def init_movie_db():
         conn.commit()
 
 
-# Initialize movie database for revies
+# Initialize movie database for reviews
 init_movie_db()
 
 def init_user_db():
@@ -284,7 +309,7 @@ def intro():
     Prints the intro message to the user
     """
     print("\n<=====Welcome to Your Movie Review Dashboard=====>\n")
-    print("You can lookup movies, review ones that you watched, and browse \
+    print("You can lookup movies, review ones that you have watched, and browse \
           \nby genres. Please login to save your reviews for later.\n")
     
     user_id = login_or_signup()
@@ -298,11 +323,12 @@ def main_menu():
     print("\n<===Main Menu===>")
     print("1. Add Review")
     print("2. View Reviews")
-    #print("3. Receive Recommendation")
-    print("3. Browse Genres")
-    print("4. Search Movie")
-    print("5. Help")
-    print("6. Quit")
+    print("3. Receive Recommendations")
+    print("4. Browse Genres")
+    print("5. Search Movie")
+    print("6. Random Trivia")
+    print("7. Help")
+    print("8. Quit")
 
 
 def add_review(user_id):
@@ -408,12 +434,26 @@ def view_reviews(user_id):
         for review_id, title, rating, review in reviews:
             print(f"ID: {review_id} | 🎬 Movie: {title}\n⭐ Rating: {rating}/10.0\n📝 Review: {review}\n")
 
-        delete_choice = input("Enter the ID of the review to delete (or press Enter to skip): ")
+        delete_choice = input("Enter the ID of the review to delete (or press Enter to go back): ")
         if delete_choice.isdigit():
             delete_review(int(delete_choice), user_id)
 
-# def receive_rec(user_id):
-#    pass
+def receive_rec(user_id):
+    response = requests.get(f"{MICROSERVICE_RECOMMENDATION_URL}?user_id={user_id}", timeout=10)
+
+    if response.status_code != 200:
+        print("Failed to get recommendations!")
+        return
+    
+    recommendations = response.json()
+
+    if not recommendations:
+        print("No new recommendations found.")
+        return
+    
+    print("\n 🎬 Recommended Movies:")
+    for movie in recommendations:
+        print(f"- {movie[1]} (ID: {movie[0]})")
 
 def browse_genres_instructions():
     """
@@ -476,6 +516,42 @@ def search():
     search_for_movie_from_tmdb(title)
 
 
+def trivia():
+    response = requests.get(f"{MICROSERVICE_TRIVIA_URL}/random")
+    if response.status_code != 200:
+        print("Failed to get trivia question!")
+        return
+    
+    trivia = response.json()
+    
+    print("\n" + trivia["question"])
+
+    for idx, option in enumerate(trivia["options"], 1):
+        print(f"{idx}. {option}")
+
+    user_choice = input("Enter the number of your answer: ")
+
+    try:
+        user_answer = trivia["options"][int(user_choice) - 1]
+    except (IndexError, ValueError):
+        print("Invalid selection.")
+        return
+    
+    check_response = requests.post(f"{MICROSERVICE_TRIVIA_URL}/answer", json={
+        "question": html.unescape(trivia["question"]).strip(),
+        "answer": user_answer
+    })
+
+    if check_response.status_code == 200:
+        result = check_response.json()
+        if result["correct"]:
+            print("✅ Correct!")
+        else:
+            print(f"❌ Incorrect! The correct answer was: {trivia['correct_answer']}")
+    else:
+        print("Error checking answer!")
+
+
 def help():
     """
     Provides basic info to the user to enhance experience
@@ -490,7 +566,11 @@ def help():
         )
 
 
-def main():
+def run_server():
+    app.run(debug=False, port=5000)
+
+
+def run_cli():
     user_id = intro()
     while True:
         main_menu()
@@ -499,21 +579,49 @@ def main():
             add_review(user_id)
         elif user_input == "2":
             view_reviews(user_id)
-        #elif user_input == "3": (for microservice)
-            #receive_rec(user_id)
         elif user_input == "3":
-            browse_genres()
+            receive_rec(user_id)
         elif user_input == "4":
-            search()
+            browse_genres()
         elif user_input == "5":
-            help()
+            search()
         elif user_input == "6":
+            trivia()
+        elif user_input == "7":
+            help()
+        elif user_input == "8":
             break
         else:
             print("\nPlease enter a valid input.")
 
     print("\nThanks for using Your Movie Review Dashboard.\n")
 
+
+def main():
+    """
+    movie_search_thread = threading.Thread(target=run_movie_search_service)
+    movie_search_thread.daemon = True
+    movie_search_thread.start()
+
+    quote_thread = threading.Thread(target=run_trivia_service)
+    quote_thread.daemon = True
+    quote_thread.start()
+
+    recommendation_thread = threading.Thread(target=run_recommendation_service)
+    recommendation_thread.daemon = True
+    recommendation_thread.start()
+
+    where_to_watch_thread = threading.Thread(target=run_where_to_watch_service)
+    where_to_watch_thread.daemon = True
+    where_to_watch_thread.start()
+    
+    server_thread = threading.Thread(target=run_server)
+    server_thread.daemon = True
+    server_thread.start()
+    """
+
+    time.sleep(1)
+    run_cli()
 
 if __name__ == "__main__":
     main()

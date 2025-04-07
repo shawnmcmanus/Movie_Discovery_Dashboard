@@ -1,0 +1,5 @@
+import threading
+from microservices.movie_search import run_movie_search_service
+from microservices.trivia import run_trivia_service
+from microservices.recommendation import run_recommendation_service
+from microservices.where_to_watch import run_where_to_watch_service
